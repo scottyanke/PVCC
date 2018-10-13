@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-#
-# This is the master program that runs on a Raspberry Pi.  It is written in
-# Python 3, and uses tkinter for the GUI.  Sqlite3 is the database to record
-# the readings.
-#
 import sqlite3
 import tkinter as tk
 from tkinter import *
@@ -12,20 +7,35 @@ import time
 import datetime
 from datetime import date, datetime
 import threading
-import random
 import queue
 import serial
-import io
-import numbers
 import sys
 
-serial_port = '/dev/ttyUSB0'
-db = "/home/pi/hvac.db"
+# Any print statements in the program will only be seen if it was started from a
+# terminal session.  Normally that is not the case as this is auto-started when
+# the Raspberry Pi boots.  It can run from a terminal, although it doesn't need to.
 
-in_showme = 0
+# The serial port that is used is a USB to RS485 device that handles the conversion
+# to the 2-wire communication line.  It also takes care of automatically switching
+# betweeen receiving and transmitting.
+serial_port = '/dev/ttyUSB0'
+
+# The location of the Sqlite database used for historical data.  Originally it was
+# on a separate USB flash drive, but that got really, really slow.
+db = "/home/pi/hvac.db"
+# The database was created using these statements -
+"""
+CREATE TABLE "ahu" ( "id" TEXT, "psi" REAL, "air" REAL, "time_taken" TEXT, "ac" TEXT   DEFAULT 'aa');
+CREATE TABLE "ahu_temps" ( "id" TEXT, "time_taken" TEXT, "temp_1" REAL, "temp_2" REAL, "temp_3" REAL, "temp_4" REAL, "temp_5" REAL, "temp_6" REAL, "temp_7" REAL, "temp_8" REAL);
+CREATE TABLE "boiler" ("time_taken" TEXT,"power" TEXT,"demand" TEXT,"burner" TEXT,"alarm" TEXT,"psi" REAL);
+CREATE TABLE "readings" ( id` TEXT, `humidity` REAL, `temperature` REAL, `time_taken` TEXT );
+"""
+
+in_showme = 0       # Used to limit trying to open multiple windows on the GUI
 num = 0
 hall_num = 0
 hvac_num = 0
+# Various arrays used by the program to hold data.
 tunnel_button = []
 tunnel_data = []
 tunnel_flag = []
@@ -39,11 +49,14 @@ hvac_data_temp = [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]
 hvac_data_ac = ['','','','','','','','','','']
 hvac_flag = []
 boiler_button = 0
-thread_id = 0
-the_time = ''
-do_it_now = 0
+thread_id = 0   # needed to cancel waiting thread, and start one immediately
+the_time = ''   # This is stored once each cycle, so every device is the same time
+do_it_now = 0   # a flag set to indicate to the threaded process we want it now
 
+# The list of devices to ask for data from, and the order to ask.
 units = ["y","z","A","B","C","D","E","1","2","3","4","5","6","7"]
+
+# The names that show up on the button labels.
 tunnel = {1:'100-even',
           2:'100-odd',
           3:'200-even',
@@ -53,6 +66,7 @@ tunnel = {1:'100-even',
           7:'500s',
           8:'open',
           9:'open'}
+# The halls are in a specific order, matching the building layout, mostly
 halls = {1:'118',
          2:'209',
          3:'225',
@@ -78,12 +92,17 @@ hvac = {1:'AHU 1',
         5:'AHU 5',
         6:'Boiler',
         7:' '}
+
+# The names associated with each column of data when displayed through the gui
 hvac_sensors = {'AHU 1':'Return,Discharge,Mixed,Outside,Social Serivces,Business Office,Fellowship, , ',
         'AHU 2':'Outside,Return,Mixed,Discharge,500s,200s, , ',
         'AHU 3':'Heritage,Northwoods,Discharge,Mixed,Return,Outside, , ',
         'AHU 4':'Return,Mixed,Discharge, , , , , ',
         'AHU 5':'Intake,Kitchen,Other,Outside, , , , ',
         'Boiler':'Demand,Burner,Alarm,Pressure'}
+# The DS18B20 addresses, and what button they are associated with.  The first two bytes are
+# not needed, as they are always the same.  Because look-ups are used, the second number does
+# not have to be in any particular order, but it does have to match a button number.
 sensors = {'dc36811402d4':15,
          'fa7c24170383':10,
          '8fa7241703a9':5,
@@ -102,20 +121,28 @@ sensors = {'dc36811402d4':15,
          '8897641501ac':16,
          '5ca264150124':17,
          '76c5311801b0':18}
+
+# The processing part of the code starts here.  The GuiPart class is used
+# with Tkinter to display buttons on the screen of the Raspberry Pi.  Some
+# buttons are used as labels, because defining them as labels on the Pi has
+# created some issues with how things are redrawn.  Only one button is
+# active at a time.
+
+# Much of this section was taken from examples posted by other people.
 class GuiPart:
     global db
     def __init__(self, master, queue):
         self.master = master
         self.queue = queue
         # Set up the GUI
-        self.title = tk.Label(master,font=("Arial",6))
+        self.title = tk.Label(master,font=("Arial",6))  # it doesn't need to be big, or even there
         self.title.grid(column=0,row=0,columnspan=7,sticky="ew")
 
         self.fill_left_label = tk.Label(left_frame, text=' ',width=2)
         self.fill_left_label.grid(column=0, row=0)
 
         self.tunnel_label = tk.Button(tunnel_frame, text="Tunnels",
-            font=("Arial", 11), relief=FLAT)
+            font=("Arial", 11), relief=FLAT)    # its a button being used as a label because redraws don't work on Raspian
         self.tunnel_label.grid(column=0,row=0,sticky="new")
         self.tunnel_label.config(activebackground=
             self.tunnel_label.cget('background'))
@@ -124,7 +151,7 @@ class GuiPart:
         self.fill1_label.grid(column=0,row=0)
 
         self.hall_label = tk.Button(hall_frame, text="Halls", font=("Arial", 11),
-            relief=FLAT)
+            relief=FLAT)    # its a button being used as a label because redraws don't work on Raspian
         self.hall_label.grid(column=0,row=0,columnspan=3,sticky="new")
         self.hall_label.config(activebackground=self.hall_label.cget('background'))
 
@@ -132,7 +159,7 @@ class GuiPart:
         self.fill2_label.grid(column=0,row=0)
 
         self.hvac_label = tk.Button(hvac_frame, text="HVAC", font=("Arial", 11),
-            relief=FLAT)
+            relief=FLAT)    # its a button being used as a label because redraws don't work on Raspian
         self.hvac_label.grid(column=0,row=0,sticky="new")
         self.hvac_label.config(activebackground=self.hvac_label.cget('background'))
 
@@ -140,51 +167,54 @@ class GuiPart:
         self.fill_right_label = tk.Label(right_frame, text=' ',width=2)
         self.fill_right_label.grid(column=0, row=0)
 
+        # status_label is actually a button that displays the current status of
+        # polling, and when pressed it starts polling regardless of what time
+        # it is.  It is updated by the threaded process.
         self.status_label = tk.Button(master, text='Starting', font=('Arial', 12),
             command=self.get_readings)
         self.status_label.grid(column=0,row=4,columnspan=7,sticky="ew")
 
-        try:
+        try:    # open the sqlite database for use reading and writing
             self.dbconnect = sqlite3.connect(db);
             self.dbconnect.row_factory = sqlite3.Row;
             self.cursor = self.dbconnect.cursor();
             db_cursor = self.cursor
             db_connect = self.dbconnect
         except:
-            print("Unable to open the database")
-            pass
-        for num in range(7):
+            print("Unable to open the database " + db)
+            raise    # The database is required to poll data, or python goes weird with the cursor
+        for num in range(7):    # There are 7 tunnels, so that many tunnel buttons
             add_new_tunnel(self.cursor)
-        for hall_num in range(15):
+        for hall_num in range(15):  # 15 hallway sensors (DS18B20s)
             add_new_hall(self.cursor)
-        for hvac_num in range(6):
+        for hvac_num in range(6):   # 5 air handlers plus the boiler
             add_new_hvac(self.cursor)
         add_boiler(self.cursor)
         self.status_label.configure(text = 'Waiting at ' + \
             time.strftime('%m/%d/%y %H:%M:%S'),foreground='black')
 
     def block_readings(self):
-        #do nothing
+        #do nothing.  Seriously, prevent things from happening with the gui.
         time.sleep(1)
-    def get_readings(self):
+    def get_readings(self):     # pressing the button forces everything to be polled
         global thread_id
         global do_it_now
         root.after_cancel(thread_id)
-        #self.show_running()
         do_it_now = 1
-        root.after(200,client.commThread)
-    def show_running(self):
+        root.after(200,client.commThread)   # Start polling for new data after 200 milliseconds
+    def show_running(self):     # Update the status button on the bottom of the screen.
         global the_time
         self.status_label.configure(text = 'Getting readings...',foreground='green',
             command=self.block_readings)
         the_time = time.strftime('%Y-%m-%d %H:%M:%S.000')
         root.update()
-    def show_idle(self):
+    def show_idle(self):        # Done after polling everything.
         self.status_label.configure(text = 'Last reading at ' + \
             time.strftime('%m/%d/%y %H:%M:%S'),foreground='black',command=self.get_readings)
         root.update()
 
-
+# The showme names are dumb, but this is code I started with that was taken from examples
+# that other people have posted.
 
 def close_showme(win):
     global in_showme
@@ -195,6 +225,8 @@ def close_showme(win):
 def focus_showme(win,b):
     b.focus_force()
 
+# Creates a pop-up window that shows the history of temperatures and humidity for
+# the device whose button was pushed.
 def popup_showme(opt,cursor):
     global in_showme
     if in_showme != 0:
@@ -218,8 +250,8 @@ def popup_showme(opt,cursor):
         command= lambda: close_showme(win))
     b.grid(row=1, column=0, columnspan=2)
 
-    degree = u'\N{DEGREE SIGN}'
-    try:
+    degree = u'\N{DEGREE SIGN}' # could probably do this globally, but don't want to...
+    try:    # get the last 500 records for that specific id
         cursor.execute('''select * from readings where id = ? order by time_taken desc limit 500''',(opt,))
         rows = cursor.fetchall()
     except:
@@ -228,7 +260,7 @@ def popup_showme(opt,cursor):
     total_count = 0
     show_record = 0
     try:
-        for row in rows:
+        for row in rows:    # Show every 20 minutes for last 24 hours, then drop to once an hour
             count = count + 1
             total_count = total_count + 1
             if total_count > 72 and count == 1:
@@ -248,9 +280,12 @@ def popup_showme(opt,cursor):
                 count = 0
     except:
         pass
+    # focus_showme forces this window to close before another window can be
+    # opended.  On a 5" touchscreen, its important.
     win.bind("<FocusOut>", lambda event, p1=win, p2=b : focus_showme(p1, p2))
     b.focus_set()
 
+# Used to show data from the air handlers
 def popup_showhvac(opt,cursor):
     global in_showme
     if in_showme != 0:
@@ -261,7 +296,6 @@ def popup_showhvac(opt,cursor):
     win.wm_title(opt + ' readings')
     win.transient(root)
     win.configure(background='')
-
 
     lb = tk.Listbox(win,width=35,height=10, font=("Arial Bold", 15),fg='dark slate gray')
     lb.configure(justify=tk.LEFT)
@@ -280,8 +314,9 @@ def popup_showhvac(opt,cursor):
     count = 0
     total_count = 0
     show_record = 0
+    # Get the last 500 records for an air handler identified by opt
     cursor.execute('''select * from ahu where id = ? order by time_taken desc limit 500''',(opt,))
-    for row in cursor.fetchall():
+    for row in cursor.fetchall():   # Show every 20 minutes for last 24 hours, then drop to once an hour
         #r = reg(cursor, row)
         count = count + 1
         total_count = total_count + 1
@@ -291,10 +326,10 @@ def popup_showhvac(opt,cursor):
             show_record = 1
         if show_record == 1:
             show_record = 0
-            psi = row['psi']    #row[1]
-            air = row['air']     #row[2]
-            taken_time = row['time_taken']   #row[3]
-            ac = row['ac']       #row[4]
+            psi = row['psi']    # Air compressor pressure
+            air = row['air']    # statis pressure in the air handler
+            taken_time = row['time_taken']  # when...
+            ac = row['ac']      # status of the air conditioning units
             ac1 = ''
             ac2 = ''
             if len(ac) > 0:
@@ -310,7 +345,7 @@ def popup_showhvac(opt,cursor):
             lb.insert('end',z)
             lb.itemconfig(lb.size()-1,fg='black')
             z= "  Compressor=%s psi, Velocity=%s kPa" % (psi,air)
-            if opt != "AHU 5":
+            if opt != "AHU 5":      # air handler 5 does NOT have a compressor or static sensors
                 lb.insert('end',z)
             z= "  %s %s" % (ac1,ac2)
             if len(ac1) > 1:
@@ -325,13 +360,14 @@ def popup_showhvac(opt,cursor):
                             z= '  %s air is %4.1f%s' % (sensor_list[i],row_temp[i+2],degree)
                             lb.insert('end',z)
             except:
-                print ('Error getting DB record for HVAC air handler')
+                print ('Error getting DB record for HVAC air handler')  # diagnostics
                 pass
         if count == 3:
             count = 0
     win.bind("<FocusOut>", lambda event, p1=win, p2=b : focus_showme(p1, p2))
     b.focus_set()
 
+# Show what the boiler history has been
 def popup_boiler(opt,cursor):
     global in_showme
     if in_showme != 0:
@@ -359,10 +395,11 @@ def popup_boiler(opt,cursor):
     count = 0
     total_count = 0
     show_record = 0
+    # Get the last 500 boiler records
     cursor.execute('''select * from boiler order by time_taken desc limit 500''')
     #rows = cursor.fetchall()
     try:
-        for row in cursor.fetchall():
+        for row in cursor.fetchall():   # Show every record for the last 24 hours, then drop to once an hour
             count = count + 1
             total_count = total_count + 1
             if total_count > 72 and count == 1:
@@ -372,14 +409,14 @@ def popup_boiler(opt,cursor):
             if show_record == 1:
                 show_record = 0
                 taken_time = row['time_taken']
+                if row['power'] == 'On':
+                    power = 'Boiler On, '
+                else:
+                    power = 'Boiler Off,'
                 if row['demand'] == 'On':
                     demand = 'Demand, '
                 else:
-                    demand = 'Boiler Off,'
-                if row['fan'] == 'On':
-                    fan = 'Fan on, '
-                else:
-                    fan = ''
+                    demand = ''
                 if row['burner'] == 'On':
                     burner = 'Burner on, '
                 else:
@@ -390,7 +427,7 @@ def popup_boiler(opt,cursor):
                     alarm = ''
                 psi = row['psi']
 
-                z= " %s %s%s%s%s  %.1fpsi" % (taken_time[5:16],demand,fan,burner,alarm,psi)
+                z= " %s %s%s%s%s  %.2fpsi" % (taken_time[5:16],power,demand,burner,alarm,psi)
                 lb.insert('end',z)
             if count == 3:
                 count = 0
@@ -399,6 +436,8 @@ def popup_boiler(opt,cursor):
     win.bind("<FocusOut>", lambda event, p1=win, p2=b : focus_showme(p1, p2))
     b.focus_set()
 
+# The add_new functions create the buttons when this program first starts.  It
+# associates names to each button which are used later.
 def add_new_tunnel(cursor):
     global num
     global tunnel_button
@@ -426,7 +465,7 @@ def add_new_hall(cursor):
         font=("Arial Bold", 12), width=10, command=cmd1)
     hall_row = i
     hall_col = 0
-    if i > 5:
+    if i > 5:   # 3 across by 5 down, button-wise
         hall_row = i - 5
         hall_col = 1
         if i > 10:
@@ -461,9 +500,11 @@ def add_boiler(cursor):
     boiler_button.grid(column=0, row=6, sticky='ew',padx=1)
     boiler_button.config(activebackground=boiler_button.cget('background'))
 
+# This is the class that polls each device for data every 20 minutes (every 30 seconds
+# for the boiler).  It is threaded to run based on time instead of user input.
 class ThreadedClient:
     last_boiler_demand = 'Off'
-    last_boiler_fan = 'Off'
+    last_boiler_power = 'Off'
     last_boiler_burner = 'Off'
     last_boiler_alarm = 'Off'
     last_boiler_psi = 0.0
@@ -480,24 +521,21 @@ class ThreadedClient:
             print("Unable to open the serial port")
             raise
         self.running = 1
-        #self.thread1 = threading.Thread(target=self.commThread)
-        #self.thread1.start(  )
-        #thread_id = self.thread1
-        thread_id = master.after(20, self.commThread)
+        thread_id = master.after(20, self.commThread)   # run after 20 milliseconds
 
-
+    # The thread that does much of the work.  None of this is interactive, although it may be started by a button.
     def commThread(self):
         global thread_id
         global the_time
         global do_it_now
         if self.running:
-            now_minute = datetime.now().minute
+            now_minute = datetime.now().minute  # Used to limit non-boiler polling
 
-            if now_minute != self.last_minute or do_it_now == 1:
+            if now_minute != self.last_minute or do_it_now == 1:    # Not a fan of python logic...
                 self.last_minute = now_minute
                 if now_minute == 0 or now_minute == 20 or now_minute == 40 or do_it_now == 1:
                     do_it_now = 0
-                    self.gui.show_running( )
+                    self.gui.show_running( )    # Update the label to show this process is running
                     root.update()
                     try:
                         conn = sqlite3.connect(db);
@@ -505,6 +543,7 @@ class ThreadedClient:
                     except:
                         print("Unable to open the database")
                         pass
+                    # Clear all the button labels so nothing is hanging on
                     for loc in range(7):
                         tunnel_button[loc].configure(text=tunnel.get(loc+1) + "\n...")
                     for loc in range(15):
@@ -512,9 +551,10 @@ class ThreadedClient:
                     for loc in range(6):
                         hvac_button[loc].configure(text=hvac.get(loc+1) + '\n...')
                     root.update()
+                    # Run through each device in the list
                     for sensor in units:
-                        if sensor < 'A':
-                            serialcmd = '\x1b'+sensor
+                        if sensor < 'A':    # This type of device is used in the tunnels (numbers 1 to 9)
+                            serialcmd = '\x1b'+sensor   # x1b is the escape character, and its followed by the sensor id
                             self.ser.write(serialcmd.encode())     # write a string
                             try:
                                 msg = self.ser.read_until(size=15).decode("utf-8")
@@ -544,7 +584,7 @@ class ThreadedClient:
                             except:
                                 pass
 
-                        if sensor >= 'A' and sensor <= 'E':
+                        if sensor >= 'A' and sensor <= 'E': # These are the five air handlers, A, B, C, D and E
                             serialcmd = '\x1b'+sensor
                             self.ser.reset_input_buffer()
                             self.ser.write(serialcmd.encode())
@@ -563,7 +603,8 @@ class ThreadedClient:
                                 except:
                                     hvac_data_temp[0] = 0.0
                                     pass
-                                if msg[2] == 'T':
+                                # msg[2] ids the sub-type of record from the monitoring device
+                                if msg[2] == 'T':   # A sub-type of T is a DS18B20
                                     try:
                                         ds18b20 = msg[8:20]
                                         try:
@@ -606,7 +647,7 @@ class ThreadedClient:
                                     except:
                                         print ("Failed on the pressure reading")
                                         pass
-                                if msg[2] == 'A':
+                                if msg[2] == 'A':   # The unit should have air moving
                                     try:
                                         temp = msg[4:9]
                                         if msg[4] == '-':
@@ -615,10 +656,10 @@ class ThreadedClient:
                                     except:
                                         print ("Failed on the air movement reading")
                                         pass
-                                if msg[2] == 'B':   # status of the Air Conditionins
+                                if msg[2] == 'B':   # status of the Air Conditioners
                                     try:
                                         hvac_data_ac[loc] = msg[4:5]
-                                        if msg[4] == 'A':
+                                        if msg[4] == 'A':   # Capital A is on, little a is off
                                             tt = hvac_button[loc].cget('text')
                                             hvac_button[loc].configure(text=tt + ', AC')
                                             root.update()
@@ -630,7 +671,7 @@ class ThreadedClient:
                                     except:
                                         print ("Failed on the air conditioner reading")
                                         raise
-                                if msg[2] == 'D':
+                                if msg[2] == 'D':   # D is for DONE, the last record sent by the air handler
                                     try:
                                         try:
                                             if hvac_data_psi[loc] == '...':
@@ -643,7 +684,7 @@ class ThreadedClient:
                                             print ('Error putting AHU psi into DB.')
                                             print (sql)
                                             pass
-                                        t1 = hvac_data_temp[0]
+                                        t1 = hvac_data_temp[0]  # up to 8 temperature sensors on each air handler
                                         t2 = hvac_data_temp[1]
                                         t3 = hvac_data_temp[2]
                                         t4 = hvac_data_temp[3]
@@ -666,7 +707,7 @@ class ThreadedClient:
                                         pass
                                     break
 
-                        if sensor >= 'a' and sensor <= 'z':
+                        if sensor >= 'a' and sensor <= 'z':     # The hallway DS18B20s are a through z
                             serialcmd = '\x1b{}t'.format(sensor)
                             self.ser.reset_input_buffer()
                             self.ser.write(serialcmd.encode())     # write a string
@@ -703,61 +744,58 @@ class ThreadedClient:
             #print ('Getting boiler status at {}:{}'.format(datetime.now().minute,datetime.now().second))
             boiler_demand = 'Off'
             boiler_burner = 'Off'
-            boiler_fan = 'Off'
+            boiler_power = 'Off'
             boiler_alarm = 'Off'
             boiler_psi = 0.00
-            serialcmd = '\x1bS'
+            serialcmd = '\x1bS'     # Capital S is the steam boiler monitor
             self.ser.write(serialcmd.encode())     # write a string
             try:
                 msg = self.ser.read_until(size=23).decode("utf-8")
                 if len(msg) > 20:
                     if msg[1] == ':' and msg[7] == ':':
                         try:
-                            boiler_psi = float(msg[2:6])
-                            if msg[14] == '1':
-                                boiler_demand = 'On'
-                            else:
-                                boiler_demand = 'Off'
+                            boiler_psi = float(msg[2:6])    # The steam pressure (0 to 15 psi)
+                            if msg[14] == '1':  # msg[14 to 17] is power,demand,burner, and alarm
+                                boiler_power = 'On'
                             if msg[15] == '1':
-                                boiler_fan = 'On'
-                            else:
-                                boiler_fan = 'Off'
+                                boiler_demand = 'On'
                             if msg[16] == '1':
                                 boiler_burner = 'On'
-                            else:
-                                boiler_burner = 'Off'
                             if msg[17] == '1':
                                 boiler_alarm = 'On'
+                            if boiler_power == 'On':
+                                boiler_button.configure(bg='cyan',activebackground='cyan',text="Boiler\nDemand {}\nBurner {}\nSteam {:.2f}psi".format(boiler_demand,boiler_burner,boiler_psi))
+                                if boiler_psi < 2.5:
+                                    boiler_button.configure(bg='Red',activebackground='Red')
                             else:
-                                boiler_alarm = 'Off'
-                            if boiler_demand == 'On':
-                                boiler_button.configure(bg='cyan',activebackground='cyan',text="Boiler\nFan {}\nBurner {}\nSteam {:.2f}psi".format(boiler_fan,boiler_burner,boiler_psi))
-                            else:
-                                if boiler_psi > 1.0:
+                                if boiler_psi > 1:
                                     boiler_button.configure(bg='#d9d9d9',activebackground='#d9d9d9',text="Boiler\nSteam {:.2f}psi".format(boiler_psi))
                                 else:
-                                    boiler_button.configure(bg='#d9d9d9',activebackground='#d9d9d9',text='')
+                                    boiler_button.configure(bg='#d9d9d9',activebackground='#d9d9d9',text="")
                             root.update()
-                            try:
-                                if self.last_boiler_demand != boiler_demand \
+                            try:    # Only record if something changed, other than pressure
+                                if self.last_boiler_power != boiler_power \
+                                or self.last_boiler_demand != boiler_demand \
                                 or self.last_boiler_burner != boiler_burner \
                                 or self.last_boiler_alarm != boiler_alarm:
                                     try:
                                         conn = sqlite3.connect(db);
                                         cursor = conn.cursor();
                                         the_time = time.strftime('%Y-%m-%d %H:%M:%S.000')
-                                        sql = "insert into boiler values ('{}','{}','{}','{}','{}',{:.2f})".format(the_time,boiler_demand,boiler_fan,boiler_burner,boiler_alarm,boiler_psi)
-                                        #print (sql)
+                                        # write the boiler record to the database using the current time
+                                        sql = "insert into boiler values ('{}','{}','{}','{}','{}',{:.2f})".format(the_time,boiler_power,boiler_demand,boiler_burner,boiler_alarm,boiler_psi)
+                                        #print (sql)    # for diagnostics
                                         cursor.execute(sql)
                                         conn.commit()
                                         conn.close()
                                     except:
                                         print ('Failed to insert record for boiler into the database')
+                                        print (sql)
                                         pass
                             except:
                                 pass
                             self.last_boiler_demand = boiler_demand
-                            self.last_boiler_fan = boiler_fan
+                            self.last_boiler_power = boiler_power
                             self.last_boiler_burner = boiler_burner
                             self.last_boiler_alarm = boiler_alarm
                             self.last_boiler_psi = boiler_psi
@@ -766,12 +804,12 @@ class ThreadedClient:
                             pass
             except:
                 pass
-            if self.last_boiler_alarm == 'On':
+            if self.last_boiler_alarm == 'On':  # Change to RED if boiler is in an alarm state.
                 boiler_button.configure(background='Red',activebackground='Red')
                 root.update()
-            thread_id = self.master.after(29000, self.commThread)  # wait 20 minutes - 1 second 1199000
+            thread_id = self.master.after(29000, self.commThread)  # wait 29 seconds then run again
     def endApplication(self):
-        self.running = 0
+        self.running = 0    # flag to indicate shutdown
 
 in_showme = 0
 root = tk.Tk()
