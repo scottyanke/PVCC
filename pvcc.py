@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/bin/python3
 import sqlite3
 import tkinter as tk
 from tkinter import *
@@ -557,7 +557,7 @@ class ThreadedClient:
                             serialcmd = '\x1b'+sensor   # x1b is the escape character, and its followed by the sensor id
                             self.ser.write(serialcmd.encode())     # write a string
                             try:
-                                msg = self.ser.read_until(size=15).decode("utf-8")
+                                msg = self.ser.read_until('\n').decode("utf-8")
                                 if len(msg) > 8:
                                     if msg[1] == ':' and msg[7] == ':':
                                         try:
@@ -589,7 +589,7 @@ class ThreadedClient:
                             self.ser.reset_input_buffer()
                             self.ser.write(serialcmd.encode())
                             while True:
-                                msg = self.ser.read_until(size=31).decode("utf-8")
+                                msg = self.ser.read_until('\n').decode("utf-8")
                                 if len(msg) == 0 or len(msg) < 5:
                                     break
 
@@ -712,7 +712,7 @@ class ThreadedClient:
                             self.ser.reset_input_buffer()
                             self.ser.write(serialcmd.encode())     # write a string
                             while True:
-                                msg = self.ser.read_until(size=30).decode("utf-8")
+                                msg = self.ser.read_until('\n').decode("utf-8")
                                 if len(msg) == 0 or len(msg) < 20:
                                     break
                                 if msg[3] == 'D':
@@ -750,7 +750,7 @@ class ThreadedClient:
             serialcmd = '\x1bS'     # Capital S is the steam boiler monitor
             self.ser.write(serialcmd.encode())     # write a string
             try:
-                msg = self.ser.read_until(size=23).decode("utf-8")
+                msg = self.ser.read_until('\n').decode("utf-8")
                 if len(msg) > 20:
                     if msg[1] == ':' and msg[7] == ':':
                         try:
