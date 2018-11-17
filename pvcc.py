@@ -10,6 +10,7 @@ import threading
 import queue
 import serial
 import sys
+import numbers
 
 # Any print statements in the program will only be seen if it was started from a
 # terminal session.  Normally that is not the case as this is auto-started when
